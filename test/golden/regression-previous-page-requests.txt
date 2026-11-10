@@ -1,0 +1,5 @@
+exit code: 0
+--- stdout
+open FIXTURE/other.html "bx fixture: other"
+Other page
+--- stderr

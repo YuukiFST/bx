@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>bx fixture: polling</title></head>
+<body>
+<main>
+  <h1>Polling page</h1>
+  <p>This page starts a request that never answers every 20 ms, like link prefetches that run until the page is left.</p>
+</main>
+<script>
+  // another host name, so these requests use their own connection pool and never block the next navigation
+  const otherHost = location.origin.replace("127.0.0.1", "localhost");
+  setInterval(() => fetch(`${otherHost}/api/never?at=${Date.now()}`, { mode: "no-cors" }), 20);
+</script>
+</body>
+</html>

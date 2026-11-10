@@ -116,8 +116,16 @@ function trackNetwork(cdp) {
   const net = { inflight: new Map(), lastEventAt: 0, documentStatus: new Map() };
   cdp.on("Network.requestWillBeSent", (p) => {
     if (STREAMING_REQUEST_TYPES.has(p.type)) return;
-    net.inflight.set(p.requestId, p.request.url);
+    net.inflight.set(p.requestId, { url: p.request.url, loaderId: p.loaderId });
     net.lastEventAt = Date.now();
+  });
+  // Chrome sends no end event for some requests of the document being left (seen on Next.js link prefetches),
+  // so once the main frame commits a new document, its predecessor's requests stop counting.
+  cdp.on("Page.frameNavigated", ({ frame }) => {
+    if (frame.parentId) return;
+    for (const [requestId, request] of net.inflight) {
+      if (request.loaderId !== frame.loaderId) net.inflight.delete(requestId);
+    }
   });
   const requestEnded = (p) => {
     if (net.inflight.delete(p.requestId)) net.lastEventAt = Date.now();
@@ -152,7 +160,7 @@ function whenDomQuietInPage(quietMs) {
 }
 
 function busyReason(tab) {
-  const urls = [...tab.net.inflight.values()];
+  const urls = [...tab.net.inflight.values()].map((request) => request.url);
   if (urls.length === 0) return "the DOM keeps changing";
   return `${urls.length} request(s) in flight: ${urls.slice(0, 3).join(" ")}`;
 }
