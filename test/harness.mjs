@@ -35,11 +35,22 @@ async function startChrome() {
     if (await fetch(`${cdpUrl}/json/version`).then((r) => r.ok, () => false)) break;
     await new Promise((ok) => setTimeout(ok, 100));
   }
+  // Browser.close ends the helper processes too; killing the main process leaves them holding the profile directory
   const stop = async () => {
     const exited = new Promise((ok) => chrome.once("exit", ok));
+    const { webSocketDebuggerUrl } = await (await fetch(`${cdpUrl}/json/version`)).json();
+    const ws = new WebSocket(webSocketDebuggerUrl);
+    ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: "Browser.close" }));
+    await Promise.race([exited, new Promise((ok) => setTimeout(ok, 5000))]);
     chrome.kill();
-    await exited;
-    rmSync(profileDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return rmSync(profileDir, { recursive: true, force: true });
+      } catch (e) {
+        if (attempt === 40) throw e;
+        await new Promise((ok) => setTimeout(ok, 250));
+      }
+    }
   };
   return { cdpUrl, stop };
 }
@@ -48,6 +59,7 @@ async function startChrome() {
 export async function startBench() {
   const [chrome, fixture] = await Promise.all([startChrome(), startFixtureServer()]);
   let sessions = 0;
+  const stateFiles = [];
 
   const newTab = async () => (await (await fetch(`${chrome.cdpUrl}/json/new?about:blank`, { method: "PUT" })).json()).id;
 
@@ -63,6 +75,7 @@ export async function startBench() {
       });
     });
     const stateFile = join(tmpdir(), `bx-${env.BX_SESSION}.json`);
+    stateFiles.push(stateFile);
     return { bx, newTab, cleanup: () => rmSync(stateFile, { force: true }) };
   };
 
@@ -73,6 +86,7 @@ export async function startBench() {
   };
 
   const stop = async () => {
+    for (const file of stateFiles) rmSync(file, { force: true });
     fixture.close();
     await chrome.stop();
   };

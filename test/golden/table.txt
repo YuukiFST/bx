@@ -1,0 +1,19 @@
+exit code: 1
+--- stdout
+open FIXTURE/ "bx fixture"
+--- stderr
+bx: table: 2 tables on the page; give the number:
+  table 1 "Companies" 4 rows: CODE | COMPANY NAME | UNIT | 
+  table 2 "Invoices" 3 rows: NUMBER | AMOUNT
+
+=== table 1 + table #invoices
+exit code: 0
+--- stdout
+CODE	COMPANY NAME	UNIT	
+101	Alfa Comércio Ltda	12 A	Save
+102	Beta & Filhos	7	Save
+103	Gama S.A.		💾
+NUMBER	AMOUNT
+NF 1	R$ 1.234,56
+NF 2	R$ 78,90
+--- stderr

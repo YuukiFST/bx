@@ -1,0 +1,25 @@
+exit code: 0
+--- stdout
+open FIXTURE/ "bx fixture"
+@1 link "Other page"
+@2 textbox "Search term"
+@3 combobox "Status" = "Any"
+@4 button "Search"
+@5 textbox "Plate"
+@6 button "Save"
+@7 button "Save"
+@8 button "Save Gama"
+@9 button "Delete"
+@10 button "Delete all"
+@11 button "Show slow panel"
+@12 div "Plain clickable div"
+--- stderr
+
+=== click @12 + click css=#delete-all
+exit code: 0
+--- stdout
+click div "Plain clickable div"
+clicked: plain div
+click button "Delete all"
+clicked: Delete all
+--- stderr

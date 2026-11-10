@@ -1,0 +1,6 @@
+exit code: 0
+--- stdout
+undefined
+[error] MARK-earlier
+[warning] MARK-now
+--- stderr

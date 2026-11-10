@@ -1,0 +1,14 @@
+exit code: 0
+--- stdout
+open FIXTURE/ "bx fixture"
+click button "Show slow panel"
+wait "Slow panel shown" visible
+press x
+key: x
+--- stderr
+
+=== wait for a text that never shows
+exit code: 1
+--- stdout
+--- stderr
+bx: wait "never shown": the text is not visible after 500 ms

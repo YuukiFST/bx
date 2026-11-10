@@ -1,16 +1,31 @@
 # bx
 
-Drives the Chrome at BX_CDP_URL. Chain steps with ` + ` in ONE call; a failed step stops the chain (exit 1) and says why.
+Drives the open Chrome tab. Do a whole task in ONE call: steps joined by ` + `.
+A failed step stops the chain, exits 1 and says why; nothing fails silently.
 
 ```
-bx open <url> + text
+bx open <url> + fill "Email" "a@b.c" + click "Sign in" + wait "Welcome" + table
 ```
 
-Steps:
-- `open <url>`: navigate; prints url and title
-- `text [selector]`: text of `<main>` (or of the selector)
-- `eval <js>`: prints the JSON result
-- `url`: current URL
+Steps
+- `open <url>` navigate
+- `click <target>`
+- `fill <target> <text>` replaces the value, checks it (select: option label)
+- `press <key>` Enter, Tab, Escape, ArrowDown, a, Control+a
+- `wait <text>` until the text shows (15 s)
+- `text [css]` text of `<main>`
+- `table [n|css]` TSV, header first; with several tables, lists them
+- `snap` interactive elements as `@ref role "name"`
+- `viewport <w>x<h>|reset` stays set until changed
+- `shot <file>` PNG; prints its size
+- `eval <js>` prints the JSON result
+- `console` console messages of the page
+- `url`
 
-Every step that changes the page returns only after the page settled (no request in flight, DOM quiet), so no sleep is needed.
-A page that never goes idle: put `--no-settle` before the first step.
+Target: the visible name, label or placeholder (case-insensitive, exact before prefix), `@ref` from `snap` or from an error, or `css=<selector>`.
+Ambiguous or missing names fail and list the candidates.
+
+Actions print one line and return after the page settles (no request in flight, DOM quiet), so no sleep is needed.
+Only content drawn by a timer needs `wait`.
+A page that never settles: `bx --no-settle ...`.
+Quote file paths.

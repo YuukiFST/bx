@@ -1,0 +1,13 @@
+exit code: 0
+--- stdout
+open FIXTURE/other.html "bx fixture: other"
+390
+shot SHOT 390x844
+--- stderr
+
+=== viewport 1366x768
+exit code: 0
+--- stdout
+viewport 1366x768
+1366
+--- stderr

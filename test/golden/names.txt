@@ -1,0 +1,25 @@
+exit code: 0
+--- stdout
+open FIXTURE/ "bx fixture"
+click button "Delete"
+clicked: Delete
+--- stderr
+
+=== next run
+exit code: 1
+--- stdout
+--- stderr
+bx: click Save: 2 elements match "Save": @1 button "Save", @2 button "Save"; pick one by @ref
+
+=== next run
+exit code: 0
+--- stdout
+click button "Save"
+saved: 102
+--- stderr
+
+=== next run
+exit code: 1
+--- stdout
+--- stderr
+bx: click "Nothing here": no element named "Nothing here"; run snap to list the elements

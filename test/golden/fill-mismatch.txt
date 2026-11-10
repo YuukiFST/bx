@@ -1,0 +1,6 @@
+exit code: 1
+--- stdout
+open FIXTURE/ "bx fixture"
+--- stderr
+bx: fill Plate abc1d23: textbox "Plate" holds "ABC1D23" after the fill, not the text given
+bx: not run: url

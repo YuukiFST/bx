@@ -1,0 +1,8 @@
+exit code: 0
+--- stdout
+fill textbox "Search term" = "Alfa & Co"
+fill combobox "Status" = "Active"
+click button "Search"
+searched: "Alfa & Co" status: "active"
+text typed while the tab was visible and focused
+--- stderr

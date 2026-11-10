@@ -25,7 +25,9 @@
     </label>
     <button type="submit">Search</button>
   </form>
+  <label>Plate <input id="plate" oninput="this.value = this.value.toUpperCase()"></label>
   <p id="echo">nothing yet</p>
+  <p id="typed-while">no text typed yet</p>
 
   <h2>Companies</h2>
   <table id="companies">
@@ -62,6 +64,9 @@
     byId("invoices").tBodies[0].innerHTML = d.invoices.map((i) => `<tr><td>${i.number}</td><td>${i.amount}</td></tr>`).join("");
   });
 
+  byId("q").addEventListener("input", () => {
+    byId("typed-while").textContent = `text typed while the tab was ${document.visibilityState} and ${document.hasFocus() ? "focused" : "not focused"}`;
+  });
   byId("search").addEventListener("submit", (e) => {
     e.preventDefault();
     const query = new URLSearchParams({ q: byId("q").value, status: byId("status").value });
