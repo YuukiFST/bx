@@ -1,0 +1,5 @@
+exit code: 0
+--- stdout
+open FIXTURE/ticker.html "bx fixture: ticker" (the page was still changing: wait <text> before reading it)
+Ticker page
+--- stderr

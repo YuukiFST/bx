@@ -1,0 +1,12 @@
+exit code: 0
+--- stdout
+open FIXTURE/widgets.html "bx fixture: widgets"
+click link "Open report" -> new tab FIXTURE/other.html
+Other page
+--- stderr
+
+=== next invocation: url
+exit code: 0
+--- stdout
+FIXTURE/other.html
+--- stderr

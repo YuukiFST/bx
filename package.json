@@ -1,6 +1,6 @@
 {
   "name": "bx",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A browser CLI for AI coding agents: a whole task in one command line, over CDP, with no daemon and no dependencies.",
   "license": "MIT",
   "type": "module",

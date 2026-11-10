@@ -1,0 +1,12 @@
+exit code: 0
+--- stdout
+open FIXTURE/widgets.html "bx fixture: widgets"
+upload file "Attachment" = upload-sample.txt
+attached: upload-sample.txt, 32 bytes
+--- stderr
+
+=== upload of a file that does not exist
+exit code: 1
+--- stdout
+--- stderr
+bx: upload Attachment SAMPLE.missing: no file at SAMPLE.missing

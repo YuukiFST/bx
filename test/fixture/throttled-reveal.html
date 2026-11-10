@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>bx fixture: throttled reveal</title></head>
+<body>
+<main>
+  <h1>Throttled reveal</h1>
+  <button id="orders">Open orders</button>
+  <div id="screen">Home screen</div>
+</main>
+<script>
+  // What React 19 does with a Suspense fallback: the fallback shows at once, and the content, although ready,
+  // replaces it only about 300 ms later. In between there is no request in flight and no DOM change.
+  const REVEAL_AFTER_FALLBACK_MS = 320;
+  document.getElementById("orders").addEventListener("click", () => {
+    const screen = document.getElementById("screen");
+    screen.textContent = "Loading…";
+    setTimeout(() => { screen.innerHTML = "<label>Order number <input></label><p>Orders: 3 open</p>"; }, REVEAL_AFTER_FALLBACK_MS);
+  });
+</script>
+</body>
+</html>

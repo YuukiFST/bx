@@ -22,4 +22,4 @@ saved: 102
 exit code: 1
 --- stdout
 --- stderr
-bx: click "Nothing here": no element named "Nothing here"; run snap to list the elements
+bx: click "Nothing here": no element named "Nothing here" at FIXTURE/; the page has: @3 link "Other page", @4 textbox "Search term", @5 combobox "Status", @6 button "Search", @7 textbox "Plate", @1 button "Save", @2 button "Save", @8 button "Save Gama", @9 button "Delete", @10 button "Delete all", @11 button "Show slow panel", @12 div "Plain clickable div"

@@ -1,0 +1,14 @@
+exit code: 0
+--- stdout
+open FIXTURE/widgets.html "bx fixture: widgets"
+fill textbox "Note" = "ok by Ana"
+click button "Approve"
+approved with note: ok by Ana
+wait "Card inside a shadow root" visible
+Step	Owner
+Review	Ana
+@1 link "Open report"
+@2 span "Help"
+@3 textbox "Note" = "ok by Ana"
+@4 button "Approve"
+--- stderr

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>bx fixture: ticker</title></head>
+<body>
+<main>
+  <h1>Ticker page</h1>
+  <p>Elapsed: <span id="elapsed">0</span></p>
+</main>
+<script>
+  // a DOM that never goes quiet, with no request in flight
+  setInterval(() => { document.getElementById("elapsed").textContent = String(performance.now()); }, 20);
+</script>
+</body>
+</html>

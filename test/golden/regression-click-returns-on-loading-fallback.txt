@@ -1,0 +1,8 @@
+exit code: 0
+--- stdout
+open FIXTURE/throttled-reveal.html "bx fixture: throttled reveal"
+click button "Open orders"
+fill textbox "Order number" = "77"
+Order number
+Orders: 3 open
+--- stderr

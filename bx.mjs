@@ -1,15 +1,21 @@
 #!/usr/bin/env node
 // bx: a browser CLI for AI coding agents.
 // One invocation connects to a running Chrome over CDP, runs a chain of steps and exits.
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 const CDP_URL = (process.env.BX_CDP_URL ?? "http://127.0.0.1:9222").replace(/\/$/, "");
 const TIMEOUT_MS = Number(process.env.BX_TIMEOUT_MS ?? 15000);
 const SETTLE_QUIET_MS = 150;
+// React shows a Suspense fallback for about 300 ms before it reveals content that is already there (measured: 240 to 320 ms
+// with no request and no DOM change), so after a DOM change the page counts as quiet only past that gap
+const DOM_QUIET_AFTER_CHANGE_MS = 400;
 const SETTLE_CAP_MS = Math.min(10000, TIMEOUT_MS);
+// a DOM that keeps changing this long with no request in flight is an animation, not a page still loading
+const DOM_CHURN_MS = Math.min(2000, SETTLE_CAP_MS);
+const NEW_TAB_WAIT_MS = 2000;
 const STATE_FILE = join(tmpdir(), `bx-${process.env.BX_SESSION ?? "default"}.json`);
 // requests that stay open by design never count as "in flight"
 const STREAMING_REQUEST_TYPES = new Set(["EventSource", "WebSocket", "Ping", "Media"]);
@@ -105,9 +111,6 @@ async function pageEval(tab, expression) {
   return r.result.value;
 }
 
-// runs a function of this file inside the page; arguments and result cross as JSON
-const pageCall = (tab, fn, ...args) => pageEval(tab, `(${fn})(${args.map((a) => JSON.stringify(a)).join(",")})`);
-
 const isNavigationError = (e) => /context was destroyed|Cannot find context|navigated or closed/i.test(e.message);
 
 // ---------- settle rule ----------
@@ -138,25 +141,17 @@ function trackNetwork(cdp) {
   return net;
 }
 
-function whenDomQuietInPage(quietMs) {
-  return new Promise((done) => {
-    const watch = () => {
-      if (quietMs === 0) return done(true);
-      let timer;
-      const finish = () => {
-        observer.disconnect();
-        done(true);
-      };
-      const observer = new MutationObserver(() => {
-        clearTimeout(timer);
-        timer = setTimeout(finish, quietMs);
-      });
-      observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
-      timer = setTimeout(finish, quietMs);
-    };
-    if (document.readyState === "complete") watch();
-    else addEventListener("load", watch, { once: true });
+// In the page: `window.__bx` holds what must outlive one call: the refs of the last snap, the field being filled,
+// whether the last click or key press arrived, and a clock of the last DOM change.
+function bxPageStore() {
+  if (window.__bx) return window.__bx;
+  const mutationClock = { lastAt: performance.now(), count: 0 };
+  const observer = new MutationObserver(() => {
+    mutationClock.lastAt = performance.now();
+    mutationClock.count += 1;
   });
+  observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  return (window.__bx = { refs: [], mutationClock });
 }
 
 function busyReason(tab) {
@@ -165,10 +160,12 @@ function busyReason(tab) {
   return `${urls.length} request(s) in flight: ${urls.slice(0, 3).join(" ")}`;
 }
 
-// Settled: the document is loaded, and for SETTLE_QUIET_MS no request was in flight and the DOM did not change.
+// Settled: the document is loaded, no request was in flight for SETTLE_QUIET_MS, and the DOM is quiet:
+// unchanged since the action for SETTLE_QUIET_MS, or DOM_QUIET_AFTER_CHANGE_MS past its last change.
 // With --no-settle only the document load is awaited. Returns null, or the reason the page is still busy at the cap.
+// A page whose requests ended but whose DOM never goes quiet (a ticker, an animation) counts as settled after DOM_CHURN_MS,
+// and the step's output line says the page was still changing.
 async function settle(tab) {
-  const quietMs = tab.noSettle ? 0 : SETTLE_QUIET_MS;
   const deadline = Date.now() + SETTLE_CAP_MS;
   for (;;) {
     const left = deadline - Date.now();
@@ -177,20 +174,33 @@ async function settle(tab) {
       await sleep(5);
       continue;
     }
-    const domQuiet = pageCall(tab, whenDomQuietInPage, quietMs).catch((e) => {
+    const domQuiet = inPage(tab, "whenDomQuiet", tab.noSettle ? 0 : DOM_QUIET_AFTER_CHANGE_MS, tab.noSettle ? 0 : SETTLE_QUIET_MS).catch((e) => {
       if (isNavigationError(e)) return false;
       throw e;
     });
-    const quiet = await Promise.race([domQuiet, sleep(left).then(() => "cap")]);
+    const churnWait = tab.noSettle ? left : Math.min(left, DOM_CHURN_MS);
+    const waitStart = Date.now();
+    const quiet = await Promise.race([domQuiet, sleep(churnWait).then(() => "cap")]);
     if (quiet === "cap") {
       domQuiet.catch(() => {});
-      return tab.noSettle ? "the document did not finish loading" : busyReason(tab);
+      if (tab.noSettle) return "the document did not finish loading";
+      const networkIdleAllWait = tab.net.inflight.size === 0 && tab.net.lastEventAt <= waitStart;
+      if (networkIdleAllWait && (await documentLoaded(tab))) {
+        tab.stillChanging = true;
+        return null;
+      }
+      continue;
     }
     if (quiet && tab.noSettle) return null;
-    if (quiet && tab.net.inflight.size === 0 && Date.now() - tab.net.lastEventAt >= quietMs) return null;
+    if (quiet && tab.net.inflight.size === 0 && Date.now() - tab.net.lastEventAt >= SETTLE_QUIET_MS) return null;
     if (!quiet) await sleep(5);
   }
 }
+
+const documentLoaded = (tab) => pageEval(tab, "document.readyState === 'complete'").catch((e) => {
+  if (isNavigationError(e)) return false;
+  throw e;
+});
 
 async function settleOrFail(tab) {
   const busy = await settle(tab);
@@ -216,37 +226,79 @@ async function stepEval(tab, [js]) {
   return value === undefined ? "undefined" : JSON.stringify(value);
 }
 
-function textInPage(selector) {
-  const root = selector ? document.querySelector(selector) : (document.querySelector("main") ?? document.body);
-  if (!root) return { error: `no element matches ${selector}` };
-  const lines = root.innerText.split("\n").map((line) => line.trim());
-  return { text: lines.filter(Boolean).join("\n") };
-}
-
 async function stepText(tab, [selector]) {
-  const r = await pageCall(tab, textInPage, selector ?? null);
+  const r = await inPage(tab, "text", selector ?? null);
   if (r.error) throw new StepError(r.error);
   return r.text;
 }
 
 // ---------- in the page: targets, tables, snapshot ----------
 
-// Evaluated in the page on every call that needs it. `window.__bx` holds what must outlive one call:
-// the refs of the last snap, the field being filled, and whether the last click or key press arrived.
-function bxPageLib() {
-  const store = (window.__bx ??= { refs: [] });
+// Evaluated in the page on every call that needs it.
+function bxPageLib(store) {
+  const { mutationClock } = store;
+  // an action starts here: a DOM left unchanged from now on needs no long quiet
+  const markAction = () => {
+    store.actionAt = performance.now();
+    store.changesAtAction = mutationClock.count;
+  };
+  const whenDomQuiet = (afterChangeMs, unchangedMs) => new Promise((done) => {
+    const check = () => {
+      const unchanged = store.actionAt !== undefined && mutationClock.count === store.changesAtAction;
+      const quietAt = unchanged ? store.actionAt + unchangedMs : mutationClock.lastAt + afterChangeMs;
+      const left = quietAt - performance.now();
+      if (left <= 0) return done(true);
+      setTimeout(check, left);
+    };
+    if (document.readyState === "complete") check();
+    else addEventListener("load", check, { once: true });
+  });
   const norm = (s) => (s ?? "").replace(/\s+/g, " ").trim();
   const FILLABLE = "input:not([type=hidden],[type=button],[type=submit],[type=reset],[type=image],[type=checkbox],[type=radio],[type=file]), textarea, select, [contenteditable=''], [contenteditable=true]";
   const INTERACTIVE = "a[href], button, input:not([type=hidden]), select, textarea, summary, [role=button], [role=link], [role=tab], [role=menuitem], [role=checkbox], [role=radio], [role=switch], [role=combobox], [role=textbox], [role=searchbox], [role=option], [contenteditable=''], [contenteditable=true], [onclick], [tabindex]:not([tabindex='-1'])";
   const TYPED_INPUT = /^(text|search|email|url|tel|password|number)$/;
   const TABLES = "table, [role=table], [role=grid]";
+  const FILE_FIELDS = "input[type=file]";
   const isVisible = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+
+  // querySelectorAll that also enters open shadow roots, in tree order
+  let shadowRootsOnPage;
+  const pageHasShadowRoots = () => (shadowRootsOnPage ??= [...document.querySelectorAll("*")].some((el) => el.shadowRoot));
+  const all = (selector) => {
+    if (!pageHasShadowRoots()) return [...document.querySelectorAll(selector)];
+    const found = [];
+    const visit = (parent) => {
+      for (const el of parent.children) {
+        if (el.matches(selector)) found.push(el);
+        if (el.shadowRoot) visit(el.shadowRoot);
+        visit(el);
+      }
+    };
+    visit(document);
+    return found;
+  };
+  const containsAcrossShadow = (el, node) => {
+    for (let up = node; up; up = up.parentNode ?? up.host) if (up === el) return true;
+    return false;
+  };
+  const elementAtPoint = (x, y) => {
+    let top = document.elementFromPoint(x, y);
+    for (let inner; top?.shadowRoot && (inner = top.shadowRoot.elementFromPoint(x, y)) && inner !== top; top = inner);
+    return top;
+  };
+  // innerText stops at a shadow root, so the text inside the shadow roots under the element is appended
+  const textOf = (root) => {
+    if (!pageHasShadowRoots()) return root.innerText;
+    const hosts = all("*").filter((el) => el.shadowRoot && containsAcrossShadow(root, el));
+    const shadowTexts = hosts.flatMap((host) => [...host.shadowRoot.children]).filter((child) => !/^(style|script)$/.test(child.localName)).map((child) => child.innerText);
+    return [root.innerText, ...shadowTexts].join("\n");
+  };
 
   const roleOf = (el) => {
     const explicit = el.getAttribute("role");
     if (explicit) return explicit;
     const tag = el.localName;
-    if (tag === "input") return { checkbox: "checkbox", radio: "radio", button: "button", submit: "button", reset: "button", search: "searchbox", range: "slider" }[el.type] ?? "textbox";
+    if (tag === "input") return { checkbox: "checkbox", radio: "radio", button: "button", submit: "button", reset: "button", search: "searchbox", range: "slider", file: "file" }[el.type] ?? "textbox";
     return { a: "link", select: "combobox", textarea: "textbox", summary: "button" }[tag] ?? (el.isContentEditable ? "textbox" : tag);
   };
   const labelText = (label) => {
@@ -257,7 +309,7 @@ function bxPageLib() {
   // accessible name, label, placeholder, visible text: every string a name may match, best first
   const namesOf = (el) => {
     const names = [el.getAttribute("aria-label")];
-    for (const id of (el.getAttribute("aria-labelledby") ?? "").split(/\s+/)) names.push(id && document.getElementById(id)?.innerText);
+    for (const id of (el.getAttribute("aria-labelledby") ?? "").split(/\s+/)) names.push(id && el.getRootNode().getElementById(id)?.innerText);
     for (const label of el.labels ?? []) names.push(labelText(label));
     if (el.localName === "input" && /^(button|submit|reset)$/.test(el.type)) names.push(el.value);
     if (!/^(input|select|textarea)$/.test(el.localName)) names.push(el.innerText, el.querySelector("img[alt]")?.alt);
@@ -270,18 +322,26 @@ function bxPageLib() {
     if (i < 0) i = store.refs.push(el) - 1;
     return `@${i + 1}`;
   };
-  const listed = (elements) => elements.slice(0, 5).map((el) => `${refOf(el)} ${describe(el)}`).join(", ");
-  const innermost = (hits) => hits.filter((el) => !hits.some((other) => other !== el && el.contains(other)));
+  const listed = (elements, limit = 5) => elements.slice(0, limit).map((el) => `${refOf(el)} ${describe(el)}`).join(", ");
+  const innermost = (hits) => hits.filter((el) => !hits.some((other) => other !== el && containsAcrossShadow(el, other)));
 
   // elements with no semantics that still look clickable: exact visible text and a pointer cursor
-  const pointerElements = (wanted) => innermost([...document.querySelectorAll("body *")].filter((el) => (
-    el.textContent.length < 300 && norm(el.textContent).toLowerCase() === wanted && isVisible(el) && getComputedStyle(el).cursor === "pointer"
+  const pointerElements = (wanted) => innermost(all("*").filter((el) => (
+    !/^(html|body)$/.test(el.localName) && el.textContent.length < 300 && norm(el.textContent).toLowerCase() === wanted && isVisible(el) && getComputedStyle(el).cursor === "pointer"
   )));
+
+  const PURPOSES = {
+    click: { selector: INTERACTIVE, noun: "element" },
+    fill: { selector: FILLABLE, noun: "field" },
+    upload: { selector: FILE_FIELDS, noun: "file field" },
+  };
+  const MISS_LIST_LIMIT = 15;
 
   const findByName = (target, purpose) => {
     const wanted = norm(target).toLowerCase();
-    const selector = purpose === "fill" ? FILLABLE : INTERACTIVE;
-    const named = [...document.querySelectorAll(selector)].filter(isVisible).map((el) => ({ el, names: namesOf(el).map((n) => n.toLowerCase()) }));
+    const { selector, noun } = PURPOSES[purpose];
+    // a file field is often hidden behind a styled button, so it is found even when it is not visible
+    const named = all(selector).filter((el) => purpose === "upload" || isVisible(el)).map((el) => ({ el, names: namesOf(el).map((n) => n.toLowerCase()) }));
     const levels = [(n) => n === wanted, (n) => n.startsWith(wanted)];
     for (const matches of levels) {
       const hits = innermost(named.filter((c) => c.names.some(matches)).map((c) => c.el));
@@ -292,8 +352,12 @@ function bxPageLib() {
     if (pointers.length === 1) return { el: pointers[0] };
     if (pointers.length > 1) return { error: `${pointers.length} elements match "${target}": ${listed(pointers)}; pick one by @ref` };
     const near = named.filter((c) => c.names.some((n) => n.includes(wanted))).map((c) => c.el);
-    const hint = near.length ? `; similar: ${listed(near)}` : "; run snap to list the elements";
-    return { error: `no ${purpose === "fill" ? "field" : "element"} named "${target}"${hint}` };
+    const miss = `no ${noun} named "${target}" at ${location.href}`;
+    if (near.length) return { error: `${miss}; similar: ${listed(near)}` };
+    if (location.href === "about:blank") return { error: `${miss}: the tab is empty, start the chain with open <url>` };
+    if (named.length === 0) return { error: `${miss}: the page has no ${noun}` };
+    const more = named.length > MISS_LIST_LIMIT ? `, and ${named.length - MISS_LIST_LIMIT} more (snap lists all)` : "";
+    return { error: `${miss}; the page has: ${listed(named.map((c) => c.el), MISS_LIST_LIMIT)}${more}` };
   };
 
   const find = (target, purpose) => {
@@ -303,29 +367,44 @@ function bxPageLib() {
       return el.isConnected ? { el } : { error: `ref ${target} left the page; run snap again` };
     }
     if (!target.startsWith("css=")) return findByName(target, purpose);
-    const found = [...document.querySelectorAll(target.slice(4))];
+    const found = all(target.slice(4));
     if (found.length === 1) return { el: found[0] };
     return { error: found.length ? `${found.length} elements match ${target}: ${listed(found)}` : `no element matches ${target}` };
   };
 
-  const prepareClick = (target) => {
+  // the point of the element a click or a hover goes to; a click also records whether it arrived
+  const preparePointer = (target, isClick) => {
+    markAction();
     const { el, error } = find(target, "click");
     if (error) return { error };
-    if (el.disabled || el.getAttribute("aria-disabled") === "true") return { error: `${describe(el)} is disabled` };
+    if (isClick && (el.disabled || el.getAttribute("aria-disabled") === "true")) return { error: `${describe(el)} is disabled` };
     el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
     const box = el.getClientRects()[0];
     if (!box) return { error: `${describe(el)} is not visible` };
     const x = box.left + box.width / 2;
     const y = box.top + box.height / 2;
-    const top = document.elementFromPoint(x, y);
-    const reaches = top && (el.contains(top) || top.closest("label")?.control === el);
+    const top = elementAtPoint(x, y);
+    const reaches = top && (containsAcrossShadow(el, top) || top.closest("label")?.control === el);
     if (!reaches) return { error: `${describe(el)} is covered by ${top ? describe(top) : "nothing: it is off screen"}` };
+    if (!isClick) return { x, y, label: describe(el) };
     store.arrived = false;
     addEventListener("click", () => { store.arrived = true; }, { capture: true, once: true });
     return { x, y, label: describe(el) };
   };
 
+  const prepareUpload = (target) => {
+    markAction();
+    const { el, error } = find(target, "upload");
+    if (error) return { error };
+    if (!el.matches(FILE_FIELDS)) return { error: `${describe(el)} is not a file field` };
+    if (el.disabled) return { error: `${describe(el)} is disabled` };
+    store.field = el;
+    return { label: describe(el) };
+  };
+  const uploadedFileNames = () => [...(store.field?.files ?? [])].map((uploaded) => uploaded.name);
+
   const prepareFill = (target, text) => {
+    markAction();
     const { el, error } = find(target, "fill");
     if (error) return { error };
     if (!el.matches(FILLABLE)) return { error: `${describe(el)} is not a field` };
@@ -343,7 +422,7 @@ function bxPageLib() {
     }
     el.scrollIntoView({ block: "center", behavior: "instant" });
     el.focus();
-    if (document.activeElement !== el) return { error: `${label} did not take the focus` };
+    if (el.getRootNode().activeElement !== el) return { error: `${label} did not take the focus` };
     if (el.isContentEditable) getSelection().selectAllChildren(el);
     else if (TYPED_INPUT.test(el.type) || el.localName === "textarea") el.select();
     else return { label, expected: text, secret, typed: false, direct: true };
@@ -366,11 +445,17 @@ function bxPageLib() {
   };
 
   const expectKey = () => {
+    markAction();
     store.arrived = false;
     addEventListener("keydown", () => { store.arrived = true; }, { capture: true, once: true });
   };
 
-  const hasText = (text) => norm(document.body?.innerText).toLowerCase().includes(norm(text).toLowerCase());
+  const hasText = (wanted) => document.body !== null && norm(textOf(document.body)).toLowerCase().includes(norm(wanted).toLowerCase());
+  const text = (selector) => {
+    const root = selector ? all(selector)[0] : (all("main")[0] ?? document.body);
+    if (!root) return { error: `no element matches ${selector}` };
+    return { text: textOf(root).split("\n").map((line) => line.trim()).filter(Boolean).join("\n") };
+  };
 
   const cellText = (cell) => {
     const text = norm(cell.innerText);
@@ -395,27 +480,27 @@ function bxPageLib() {
   };
 
   const table = (pick) => {
-    const all = [...document.querySelectorAll(TABLES)].filter(isVisible);
-    let chosen = all[0];
-    if (pick === null && all.length > 1) {
-      const lines = all.map((t, i) => {
+    const tables = all(TABLES).filter(isVisible);
+    let chosen = tables[0];
+    if (pick === null && tables.length > 1) {
+      const lines = tables.map((t, i) => {
         const rows = rowsOf(t);
         return `  table ${i + 1} ${JSON.stringify(tableTitle(t))} ${rows.length} rows: ${(rows[0] ?? []).join(" | ")}`;
       });
-      return { error: `${all.length} tables on the page; give the number:\n${lines.join("\n")}` };
+      return { error: `${tables.length} tables on the page; give the number:\n${lines.join("\n")}` };
     }
-    if (pick !== null && /^\d+$/.test(pick)) chosen = all[Number(pick) - 1];
+    if (pick !== null && /^\d+$/.test(pick)) chosen = tables[Number(pick) - 1];
     else if (pick !== null) {
-      const found = document.querySelector(pick);
+      const found = all(pick)[0];
       chosen = found?.matches(TABLES) ? found : found?.querySelector(TABLES);
     }
-    if (!chosen) return { error: pick === null ? "no table on the page" : `no table ${pick}; the page has ${all.length} table(s)` };
+    if (!chosen) return { error: pick === null ? "no table on the page" : `no table ${pick}; the page has ${tables.length} table(s)` };
     return { tsv: rowsOf(chosen).map((cells) => cells.join("\t")).join("\n") };
   };
 
   const snap = () => {
     store.refs = [];
-    const lines = [...document.querySelectorAll(INTERACTIVE)].filter(isVisible).map((el) => {
+    const lines = all(INTERACTIVE).filter(isVisible).map((el) => {
       let line = `${refOf(el)} ${describe(el)}`;
       if (el.matches(FILLABLE) && el.type !== "password" && el.localName !== "select" && el.value) line += ` = ${JSON.stringify(el.value)}`;
       if (el.localName === "select") line += ` = ${JSON.stringify(norm(el.selectedOptions[0]?.label))}`;
@@ -426,10 +511,10 @@ function bxPageLib() {
     return lines.join("\n");
   };
 
-  return { prepareClick, prepareFill, setFieldValue, fieldValue, expectKey, arrived: () => store.arrived, hasText, table, snap };
+  return { markAction, whenDomQuiet, preparePointer, prepareFill, prepareUpload, uploadedFileNames, setFieldValue, fieldValue, expectKey, arrived: () => store.arrived, hasText, text, table, snap };
 }
 
-const inPage = (tab, method, ...args) => pageEval(tab, `(${bxPageLib})().${method}(${args.map((a) => JSON.stringify(a)).join(",")})`);
+const inPage = (tab, method, ...args) => pageEval(tab, `(${bxPageLib})((${bxPageStore})()).${method}(${args.map((a) => JSON.stringify(a)).join(",")})`);
 
 // A click or key press must reach the page. A navigation it caused replaces the page, which proves the same.
 async function assertInputArrived(tab, what) {
@@ -442,8 +527,22 @@ async function assertInputArrived(tab, what) {
 
 // ---------- steps that act ----------
 
+const pageTargetIds = async (tab) => (await tab.cdp.send("Target.getTargets")).targetInfos.filter((t) => t.type === "page").map((t) => t.targetId);
+
+// The tab a click opened (target=_blank, window.open), or undefined. The chain goes on in it, as the user's eyes would.
+async function tabOpenedByClick(tab, tabsBefore) {
+  if (!tab.windowOpened) return undefined;
+  tab.windowOpened = false;
+  const deadline = Date.now() + NEW_TAB_WAIT_MS;
+  for (;;) {
+    const opened = (await pageTargetIds(tab)).find((id) => !tabsBefore.includes(id));
+    if (opened || Date.now() >= deadline) return opened;
+    await sleep(50);
+  }
+}
+
 async function stepClick(tab, [target]) {
-  const prepared = await inPage(tab, "prepareClick", target);
+  const [prepared, tabsBefore] = await Promise.all([inPage(tab, "preparePointer", target, true), pageTargetIds(tab)]);
   if (prepared.error) throw new StepError(prepared.error);
   const mouse = { x: prepared.x, y: prepared.y, button: "left", clickCount: 1 };
   await tab.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: prepared.x, y: prepared.y });
@@ -451,7 +550,35 @@ async function stepClick(tab, [target]) {
   await tab.cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...mouse });
   await assertInputArrived(tab, "the click");
   await settleOrFail(tab);
-  return `click ${prepared.label}`;
+  const opened = await tabOpenedByClick(tab, tabsBefore);
+  if (!opened) return `click ${prepared.label}`;
+  await useTab(tab, opened);
+  await settleOrFail(tab);
+  return `click ${prepared.label} -> new tab ${await pageEval(tab, "location.href")}`;
+}
+
+async function stepHover(tab, [target]) {
+  const prepared = await inPage(tab, "preparePointer", target, false);
+  if (prepared.error) throw new StepError(prepared.error);
+  await tab.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: prepared.x, y: prepared.y });
+  await settleOrFail(tab);
+  return `hover ${prepared.label}`;
+}
+
+async function stepUpload(tab, [target, file]) {
+  const path = resolve(file);
+  if (!existsSync(path)) throw new StepError(`no file at ${path}`);
+  const prepared = await inPage(tab, "prepareUpload", target);
+  if (prepared.error) throw new StepError(prepared.error);
+  const field = await tab.cdp.send("Runtime.evaluate", { expression: "window.__bx.field" });
+  await tab.cdp.send("DOM.setFileInputFiles", { files: [path], objectId: field.result.objectId });
+  await settleOrFail(tab);
+  const names = await inPage(tab, "uploadedFileNames").catch((e) => {
+    if (isNavigationError(e)) return [basename(path)];
+    throw e;
+  });
+  if (names.join() !== basename(path)) throw new StepError(`${prepared.label} holds ${JSON.stringify(names)} after the upload, not the file given`);
+  return `upload ${prepared.label} = ${names[0]}`;
 }
 
 async function stepFill(tab, [target, text]) {
@@ -540,6 +667,7 @@ async function stepViewport(tab, [size]) {
     const [, width, height] = /^(\d+)x(\d+)$/.exec(size) ?? [];
     if (!width) throw new StepError(`"${size}" is not a size; write 390x844, or reset`);
     tab.state.viewport = { width: Number(width), height: Number(height) };
+    await inPage(tab, "markAction");
     await applyViewport(tab, tab.state.viewport);
   }
   await settleOrFail(tab);
@@ -585,7 +713,9 @@ async function stepConsole(tab) {
 const STEPS = {
   open: { usage: "open <url>", minArgs: 1, maxArgs: 1, settles: true, front: true, run: stepOpen },
   click: { usage: "click <target>", minArgs: 1, maxArgs: 1, settles: true, front: true, run: stepClick },
+  hover: { usage: "hover <target>", minArgs: 1, maxArgs: 1, settles: true, front: true, run: stepHover },
   fill: { usage: "fill <target> <text>", minArgs: 2, maxArgs: 2, settles: true, front: true, run: stepFill },
+  upload: { usage: "upload <target> <file>", minArgs: 2, maxArgs: 2, settles: true, front: true, run: stepUpload },
   press: { usage: "press <key>", minArgs: 1, maxArgs: 1, settles: true, front: true, run: stepPress },
   wait: { usage: "wait <text>", minArgs: 1, maxArgs: 1, run: stepWait },
   text: { usage: "text [selector]", minArgs: 0, maxArgs: 1, run: stepText },
@@ -616,13 +746,16 @@ function parseChain(argv) {
 
 const stepLabel = ({ name, args }) => [name, ...args.map((a) => (/[\s"]/.test(a) ? JSON.stringify(a) : a))].join(" ");
 
-async function prepareTab(tab, chain) {
-  const { cdp } = tab;
-  const setup = [cdp.send("Page.enable")];
+async function prepareTab(tab) {
+  const { cdp, chain } = tab;
+  tab.net = trackNetwork(cdp);
+  // the clock of DOM changes starts with every document this invocation loads
+  const setup = [cdp.send("Page.enable"), cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: `(${bxPageStore})()` })];
   cdp.on("Page.javascriptDialogOpening", (p) => {
     tab.out.push(`dialog ${p.type} ${JSON.stringify(p.message)} accepted`);
     cdp.send("Page.handleJavaScriptDialog", { accept: true }).catch(() => {});
   });
+  cdp.on("Page.windowOpen", () => { tab.windowOpened = true; });
   if (tab.state.viewport) setup.push(applyViewport(tab, tab.state.viewport));
   if (chain.some((s) => s.name === "console")) setup.push(...recordConsole(tab));
   if (chain.some((s) => s.step.settles)) setup.push(cdp.send("Network.enable"));
@@ -632,16 +765,24 @@ async function prepareTab(tab, chain) {
   await Promise.all(setup);
 }
 
+// moves the rest of the chain, and the next invocations, to another tab
+async function useTab(tab, targetId) {
+  tab.state.targetId = targetId;
+  tab.cdp = cdpClient(await openWebSocket(pageWsUrl(targetId)));
+  await prepareTab(tab);
+}
+
 async function runChain(chain, noSettle, out) {
   const state = readState();
   const savedState = JSON.stringify(state);
-  const cdp = await attachTab(state);
-  const tab = { cdp, state, noSettle, out, net: trackNetwork(cdp) };
-  await prepareTab(tab, chain);
+  const tab = { cdp: await attachTab(state), state, chain, noSettle, out, stillChanging: false, windowOpened: false };
+  await prepareTab(tab);
   try {
     for (const [i, s] of chain.entries()) {
       try {
-        out.push(await s.step.run(tab, s.args));
+        const line = await s.step.run(tab, s.args);
+        out.push(tab.stillChanging ? `${line} (the page was still changing: wait <text> before reading it)` : line);
+        tab.stillChanging = false;
       } catch (e) {
         if (!(e instanceof StepError)) throw e;
         const notRun = chain.slice(i + 1).map(stepLabel);

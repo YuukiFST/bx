@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>bx fixture: widgets</title>
+<style>
+  #tip { display: none; }
+  #help:hover + #tip { display: block; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Widgets</h1>
+  <p id="echo">nothing yet</p>
+
+  <a href="/other.html" target="_blank">Open report</a>
+
+  <span id="help" tabindex="0">Help</span>
+  <p id="tip">Tip: shown while the pointer is over Help</p>
+
+  <label for="attachment">Attachment</label>
+  <input id="attachment" type="file" style="display: none">
+
+  <approval-card></approval-card>
+</main>
+<script>
+  const echo = document.getElementById("echo");
+  document.getElementById("attachment").addEventListener("change", (e) => {
+    const [file] = e.target.files;
+    echo.textContent = `attached: ${file.name}, ${file.size} bytes`;
+  });
+
+  customElements.define("approval-card", class extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: "open" });
+      root.innerHTML = `
+        <style>p { margin: 0; }</style>
+        <p>Card inside a shadow root</p>
+        <label>Note <input id="note"></label>
+        <button>Approve</button>
+        <table><tr><th>Step</th><th>Owner</th></tr><tr><td>Review</td><td>Ana</td></tr></table>`;
+      root.querySelector("button").addEventListener("click", () => {
+        echo.textContent = `approved with note: ${root.getElementById("note").value}`;
+      });
+    }
+  });
+</script>
+</body>
+</html>
