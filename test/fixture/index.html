@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>bx fixture</title>
+<style>
+  th { text-transform: uppercase; }
+  [hidden] { display: none; }
+</style>
+</head>
+<body>
+<nav><a href="/other.html">Other page</a></nav>
+<main>
+  <h1>Fixture</h1>
+
+  <form id="search">
+    <label for="q">Search term</label>
+    <input id="q" name="q" placeholder="Type a company name">
+    <label>Status
+      <select id="status">
+        <option value="">Any</option>
+        <option value="active">Active</option>
+        <option value="closed">Closed</option>
+      </select>
+    </label>
+    <button type="submit">Search</button>
+  </form>
+  <p id="echo">nothing yet</p>
+
+  <h2>Companies</h2>
+  <table id="companies">
+    <thead><tr><th>Code</th><th>Company name</th><th>Unit</th><th></th></tr></thead>
+    <tbody>
+      <tr><td>101</td><td>Alfa Comércio Ltda</td><td>12 A</td><td><button>Save</button></td></tr>
+      <tr><td>102</td><td>Beta &amp; Filhos</td><td>7</td><td><button>Save</button></td></tr>
+      <tr><td>103</td><td>Gama S.A.</td><td></td><td><button aria-label="Save Gama">💾</button></td></tr>
+    </tbody>
+  </table>
+
+  <h2>Invoices</h2>
+  <table id="invoices" aria-label="Invoices">
+    <thead><tr><th>Number</th><th>Amount</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <p id="late">loading</p>
+
+  <h2>Actions</h2>
+  <button id="delete">Delete</button>
+  <button id="delete-all">Delete all</button>
+  <button id="slow">Show slow panel</button>
+  <div id="plain-div" style="cursor: pointer" onclick="echo.textContent = 'clicked: plain div'">Plain clickable div</div>
+  <p id="slow-panel" hidden>Slow panel shown</p>
+  <p id="keys">no key yet</p>
+</main>
+<script>
+  const byId = (id) => document.getElementById(id);
+  console.log("fixture log: page script started");
+  console.error("fixture error: something failed");
+
+  fetch("/api/late").then((r) => r.json()).then((d) => {
+    byId("late").textContent = d.message;
+    byId("invoices").tBodies[0].innerHTML = d.invoices.map((i) => `<tr><td>${i.number}</td><td>${i.amount}</td></tr>`).join("");
+  });
+
+  byId("search").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const query = new URLSearchParams({ q: byId("q").value, status: byId("status").value });
+    fetch(`/api/search?${query}`).then((r) => r.json()).then((d) => { byId("echo").textContent = d.message; });
+  });
+  for (const id of ["delete", "delete-all"]) {
+    byId(id).addEventListener("click", () => { byId("echo").textContent = `clicked: ${byId(id).textContent}`; });
+  }
+  for (const button of document.querySelectorAll("#companies button")) {
+    button.addEventListener("click", () => { byId("echo").textContent = `saved: ${button.closest("tr").cells[0].textContent}`; });
+  }
+  // rendered by a timer with no request in flight: the settle rule cannot see it coming, `wait` can
+  byId("slow").addEventListener("click", () => setTimeout(() => { byId("slow-panel").hidden = false; }, 600));
+  addEventListener("keydown", (e) => { byId("keys").textContent = `key: ${e.key}`; });
+</script>
+</body>
+</html>

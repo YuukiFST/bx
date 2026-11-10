@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>bx fixture: busy</title></head>
+<body>
+<main>
+  <h1>Busy page</h1>
+  <p>This page keeps one request open forever.</p>
+</main>
+<script>
+  fetch("/api/never");
+</script>
+</body>
+</html>

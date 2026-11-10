@@ -1,0 +1,17 @@
+{
+  "name": "bx",
+  "version": "0.1.0",
+  "description": "A browser CLI for AI coding agents: a whole task in one command line, over CDP, with no daemon and no dependencies.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "bx": "bx.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "repository": "github:YuukiFST/bx"
+}

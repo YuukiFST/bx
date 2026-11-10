@@ -1,0 +1,13 @@
+exit code: 1
+--- stdout
+--- stderr
+bx: open FIXTURE/busy.html: page not settled after 1000 ms (1 request(s) in flight: FIXTURE/api/never); use "wait <text>" with --no-settle
+bx: not run: text
+
+=== with --no-settle
+exit code: 0
+--- stdout
+open FIXTURE/busy.html "bx fixture: busy"
+Busy page
+This page keeps one request open forever.
+--- stderr

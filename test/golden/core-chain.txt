@@ -1,0 +1,10 @@
+exit code: 0
+--- stdout
+open FIXTURE/other.html "bx fixture: other"
+FIXTURE/other.html
+{"sum":2,"list":["a"]}
+undefined
+Other page
+window not resized yet
+Other page
+--- stderr

@@ -1,0 +1,8 @@
+exit code: 0
+--- stdout
+open FIXTURE/ "bx fixture"
+late content ready
+NUMBER	AMOUNT
+NF 1	R$ 1.234,56
+NF 2	R$ 78,90
+--- stderr

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>bx fixture: other</title></head>
+<body>
+<main>
+  <h1>Other page</h1>
+  <p id="width">window not resized yet</p>
+</main>
+<script>
+  const showWidth = () => { document.getElementById("width").textContent = `window is ${innerWidth} px wide`; };
+  addEventListener("resize", showWidth);
+</script>
+</body>
+</html>

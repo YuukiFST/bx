@@ -1,0 +1,6 @@
+exit code: 1
+--- stdout
+open FIXTURE/other.html "bx fixture: other"
+--- stderr
+bx: eval missingFunction(): ReferenceError: missingFunction is not defined
+bx: not run: text h1 + url
