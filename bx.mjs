@@ -245,7 +245,8 @@ function trackNetwork(cdp) {
 // whether the last click or key press arrived, and a clock of the last DOM change.
 // Installed from the first script of a document on, it also records the work the page has pending (`work`).
 function bxPageStore(fromDocumentStart) {
-  if (window.__bx) return window.__bx;
+  // a store without `native` was left in the page by an older bx
+  if (window.__bx?.native) return window.__bx;
   const mutationClock = { lastAt: performance.now(), count: 0 };
   const recordMutation = () => {
     mutationClock.lastAt = performance.now();
@@ -521,8 +522,8 @@ async function stepText(tab, [selector]) {
 
 // ---------- in the page: targets, tables, snapshot ----------
 
-// Evaluated in the page on every call that needs it.
-function bxPageLib(store) {
+// Evaluated in the page once per document.
+function bxPageLib(store, version) {
   const { mutationClock, native, work } = store;
   // an action starts here: a DOM left unchanged from now on needs no long quiet
   const markAction = () => {
@@ -842,10 +843,22 @@ function bxPageLib(store) {
     return lines.join("\n");
   };
 
-  return { markResize, whenDomQuiet, preparePointer, prepareFill, prepareUpload, uploadedFileNames, setFieldValue, fieldValue, expectKey, arrived: () => store.arrived, hasText, text, table, snap };
+  const methods = { markResize, whenDomQuiet, preparePointer, prepareFill, prepareUpload, uploadedFileNames, setFieldValue, fieldValue, expectKey, arrived: () => store.arrived, hasText, text, table, snap };
+  const run = (method, ...args) => {
+    shadowRootsOnPage = undefined;
+    return methods[method](...args);
+  };
+  store.lib = { version, run };
 }
 
-const inPage = (tab, method, ...args) => pageEval(tab, `(${bxPageLib})((${bxPageStore})()).${method}(${args.map((a) => JSON.stringify(a)).join(",")})`);
+const LIB_MISSING = "bx: no lib";
+
+async function inPage(tab, method, ...args) {
+  const call = `window.__bx.lib.run(${[method, ...args].map((a) => JSON.stringify(a)).join(",")})`;
+  const result = await pageEval(tab, `window.__bx?.lib?.version === "${VERSION}" ? ${call} : "${LIB_MISSING}"`);
+  if (result !== LIB_MISSING) return result;
+  return pageEval(tab, `(${bxPageLib})((${bxPageStore})(), "${VERSION}"), ${call}`);
+}
 
 // A click or key press must reach the page. A navigation it caused replaces the page, which proves the same.
 async function assertInputArrived(tab, what) {
