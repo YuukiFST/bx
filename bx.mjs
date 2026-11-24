@@ -116,7 +116,7 @@ const isNavigationError = (e) => /context was destroyed|Cannot find context|navi
 // ---------- settle rule ----------
 
 function trackNetwork(cdp) {
-  const net = { inflight: new Map(), lastEventAt: 0, documentStatus: new Map() };
+  const net = { inflight: new Map(), lastEventAt: 0, documentStatus: new Map(), loaderId: undefined };
   cdp.on("Network.requestWillBeSent", (p) => {
     if (STREAMING_REQUEST_TYPES.has(p.type)) return;
     net.inflight.set(p.requestId, { url: p.request.url, loaderId: p.loaderId });
@@ -126,6 +126,7 @@ function trackNetwork(cdp) {
   // so once the main frame commits a new document, its predecessor's requests stop counting.
   cdp.on("Page.frameNavigated", ({ frame }) => {
     if (frame.parentId) return;
+    net.loaderId = frame.loaderId;
     for (const [requestId, request] of net.inflight) {
       if (request.loaderId !== frame.loaderId) net.inflight.delete(requestId);
     }
@@ -143,15 +144,159 @@ function trackNetwork(cdp) {
 
 // In the page: `window.__bx` holds what must outlive one call: the refs of the last snap, the field being filled,
 // whether the last click or key press arrived, and a clock of the last DOM change.
-function bxPageStore() {
+// Installed from the first script of a document on, it also records the work the page has pending (`work`).
+function bxPageStore(fromDocumentStart) {
   if (window.__bx) return window.__bx;
   const mutationClock = { lastAt: performance.now(), count: 0 };
-  const observer = new MutationObserver(() => {
+  const recordMutation = () => {
     mutationClock.lastAt = performance.now();
     mutationClock.count += 1;
-  });
+  };
+  const observer = new MutationObserver(recordMutation);
   observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
-  return (window.__bx = { refs: [], mutationClock });
+  const native = {
+    setTimeout: window.setTimeout.bind(window),
+    requestAnimationFrame: window.requestAnimationFrame.bind(window),
+    postTask: window.scheduler?.postTask?.bind(window.scheduler),
+    getAnimations: document.getAnimations.bind(document),
+  };
+  const store = (window.__bx = { refs: [], mutationClock, native });
+  if (!fromDocumentStart || window.top !== window || !native.postTask) return store;
+
+  const SHORT_DELAY_MS = 500;
+  const REACTION_SLACK_MS = 100;
+  // a callback scheduled by a callback scheduled by a callback is a loop (a poll, an animation), not a reaction to an action
+  const LOOP_DEPTH = 2;
+  let callbackDepth = 0;
+  const pending = new Set();
+  const byId = { timer: new Map(), frame: new Map(), idle: new Map() };
+  const work = (store.work = { pending, intervals: new Map(), callbacksRun: 0, untrackedAt: -1, untrackedSource: false, frameObserver: false, followsAnimations: false, leaving: false });
+  work.reactionPending = () => {
+    const now = performance.now();
+    return [...pending].some((item) => item.depth < LOOP_DEPTH && now < item.dueAt + REACTION_SLACK_MS);
+  };
+  const runAtDepth = (depth, callback, self, args) => {
+    const outerDepth = callbackDepth;
+    callbackDepth = depth;
+    try {
+      return Reflect.apply(callback, self, args);
+    } finally {
+      callbackDepth = outerDepth;
+      work.callbacksRun += 1;
+    }
+  };
+  const markUntracked = () => { work.untrackedAt = performance.now(); };
+  const wrap = (holder, name, traps) => {
+    if (typeof holder?.[name] === "function") holder[name] = new Proxy(holder[name], traps);
+  };
+
+  const trackOnce = (name, ids, dueIn) => wrap(window, name, {
+    apply(target, self, args) {
+      const callback = args[0];
+      const due = dueIn(args);
+      if (due > SHORT_DELAY_MS) return Reflect.apply(target, self, args);
+      if (typeof callback !== "function") {
+        markUntracked();
+        return Reflect.apply(target, self, args);
+      }
+      const item = { dueAt: performance.now() + due, depth: callbackDepth };
+      const run = function (...callbackArgs) {
+        pending.delete(item);
+        ids.delete(id);
+        return runAtDepth(item.depth + 1, callback, this, callbackArgs);
+      };
+      const id = Reflect.apply(target, self, [run, ...args.slice(1)]);
+      pending.add(item);
+      ids.set(id, item);
+      return id;
+    },
+  });
+  const forget = (name, ids) => wrap(window, name, {
+    apply(target, self, args) {
+      pending.delete(ids.get(args[0]));
+      ids.delete(args[0]);
+      if (ids === byId.timer) work.intervals.delete(args[0]);
+      return Reflect.apply(target, self, args);
+    },
+  });
+  const delayOf = (args) => Number(args[1]) || 0;
+  trackOnce("setTimeout", byId.timer, delayOf);
+  trackOnce("requestAnimationFrame", byId.frame, () => 50);
+  trackOnce("requestIdleCallback", byId.idle, () => 50);
+  forget("clearTimeout", byId.timer);
+  forget("clearInterval", byId.timer);
+  forget("cancelAnimationFrame", byId.frame);
+  forget("cancelIdleCallback", byId.idle);
+  wrap(window, "setInterval", {
+    apply(target, self, args) {
+      const callback = args[0];
+      if (delayOf(args) > SHORT_DELAY_MS) return Reflect.apply(target, self, args);
+      if (typeof callback !== "function") {
+        work.untrackedSource = true;
+        return Reflect.apply(target, self, args);
+      }
+      const item = { lastRunAt: -1, writes: false };
+      const run = function (...callbackArgs) {
+        try {
+          return runAtDepth(LOOP_DEPTH, callback, this, callbackArgs);
+        } finally {
+          item.lastRunAt = performance.now();
+          // the mutations of this callback, which the observer would only report after it
+          if (observer.takeRecords().length > 0) {
+            recordMutation();
+            item.writes = true;
+          }
+        }
+      };
+      const id = Reflect.apply(target, self, [run, ...args.slice(1)]);
+      work.intervals.set(id, item);
+      return id;
+    },
+  });
+
+  // Work that cannot be followed. A call to one of these after an action, or one open source, leaves only the quiet windows.
+  const marksUntracked = { apply(target, self, args) { markUntracked(); return Reflect.apply(target, self, args); } };
+  const UNTRACKED_CALLS = {
+    Scheduler: ["postTask"], ServiceWorker: ["postMessage"], IDBFactory: ["open"], IDBDatabase: ["transaction"], Document: ["startViewTransition"],
+    FileReader: ["readAsText", "readAsDataURL", "readAsArrayBuffer"], Blob: ["text", "arrayBuffer", "stream"],
+    Cache: ["match", "put", "add"], CacheStorage: ["open", "match"], HTMLImageElement: ["decode"], LockManager: ["request"],
+    SubtleCrypto: ["digest", "encrypt", "decrypt", "sign", "verify", "deriveKey", "deriveBits", "importKey"],
+    Clipboard: ["read", "readText", "write", "writeText"],
+  };
+  for (const [owner, names] of Object.entries(UNTRACKED_CALLS)) {
+    for (const name of names) wrap(window[owner]?.prototype, name, marksUntracked);
+  }
+  wrap(window, "createImageBitmap", marksUntracked);
+  const flagOnConstruct = (names, flag) => {
+    const traps = { construct(target, args, newTarget) { work[flag] = true; return Reflect.construct(target, args, newTarget); } };
+    for (const name of names) wrap(window, name, traps);
+  };
+  flagOnConstruct(["WebSocket", "EventSource", "Worker", "SharedWorker", "BroadcastChannel", "RTCPeerConnection", "WebTransport"], "untrackedSource");
+  // their callbacks run with the next frame, after the tasks already queued
+  flagOnConstruct(["IntersectionObserver", "ResizeObserver"], "frameObserver");
+  // an animation matters once the page reacts to the end of one
+  const followsAnimations = { apply(target, self, args) { work.followsAnimations = true; return Reflect.apply(target, self, args); } };
+  wrap(Element.prototype, "animate", followsAnimations);
+  wrap(Element.prototype, "getAnimations", followsAnimations);
+  wrap(Document.prototype, "getAnimations", followsAnimations);
+  const ANIMATION_EVENT = /^(transition|animation)(end|cancel|iteration)$/;
+  wrap(EventTarget.prototype, "addEventListener", {
+    apply(target, self, args) {
+      if (ANIMATION_EVENT.test(args[0])) work.followsAnimations = true;
+      return Reflect.apply(target, self, args);
+    },
+  });
+  for (const name of ["ontransitionend", "onanimationend"]) {
+    const property = Object.getOwnPropertyDescriptor(HTMLElement.prototype, name);
+    if (!property) continue;
+    Object.defineProperty(HTMLElement.prototype, name, { ...property, set(listener) { work.followsAnimations = true; property.set.call(this, listener); } });
+  }
+  window.navigation?.addEventListener("navigate", (event) => {
+    if (!event.downloadRequest && !event.destination.sameDocument) work.leaving = true;
+  });
+  // a navigation the page handled itself left no document
+  for (const type of ["navigatesuccess", "navigateerror"]) window.navigation?.addEventListener(type, () => { work.leaving = false; });
+  return store;
 }
 
 function busyReason(tab) {
@@ -160,8 +305,10 @@ function busyReason(tab) {
   return `${urls.length} request(s) in flight: ${urls.slice(0, 3).join(" ")}`;
 }
 
-// Settled: the document is loaded, no request was in flight for SETTLE_QUIET_MS, and the DOM is quiet:
-// unchanged since the action for SETTLE_QUIET_MS, or DOM_QUIET_AFTER_CHANGE_MS past its last change.
+// Settled: the document is loaded, no request is in flight, and the page is idle: nothing it scheduled is still to run.
+// When that cannot be proven (bx did not load the page, or it works in ways bx cannot follow), the quiet windows decide:
+// no request in flight for SETTLE_QUIET_MS, and a DOM unchanged since the action for SETTLE_QUIET_MS,
+// or DOM_QUIET_AFTER_CHANGE_MS past its last change.
 // With --no-settle only the document load is awaited. Returns null, or the reason the page is still busy at the cap.
 // A page whose requests ended but whose DOM never goes quiet (a ticker, an animation) counts as settled after DOM_CHURN_MS,
 // and the step's output line says the page was still changing.
@@ -170,7 +317,8 @@ async function settle(tab) {
   for (;;) {
     const left = deadline - Date.now();
     if (left <= 0) return busyReason(tab);
-    if (!tab.noSettle && tab.net.inflight.size > 0) {
+    const opening = tab.openedLoaderId !== undefined && tab.net.loaderId !== tab.openedLoaderId;
+    if (!tab.noSettle && (tab.net.inflight.size > 0 || opening)) {
       await sleep(5);
       continue;
     }
@@ -192,6 +340,11 @@ async function settle(tab) {
       continue;
     }
     if (quiet && tab.noSettle) return null;
+    // a request that started or ended during the wait may have a reaction queued behind the idle turn
+    if (quiet === "idle") {
+      if (tab.net.inflight.size === 0 && tab.net.lastEventAt < waitStart) return null;
+      continue;
+    }
     if (quiet && tab.net.inflight.size === 0 && Date.now() - tab.net.lastEventAt >= SETTLE_QUIET_MS) return null;
     if (!quiet) await sleep(5);
   }
@@ -204,6 +357,7 @@ const documentLoaded = (tab) => pageEval(tab, "document.readyState === 'complete
 
 async function settleOrFail(tab) {
   const busy = await settle(tab);
+  tab.openedLoaderId = undefined;
   if (busy) throw new StepError(`page not settled after ${SETTLE_CAP_MS} ms (${busy}); use "wait <text>" with --no-settle`);
 }
 
@@ -212,6 +366,7 @@ async function settleOrFail(tab) {
 async function stepOpen(tab, [url]) {
   const nav = await tab.cdp.send("Page.navigate", { url: /^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `http://${url}` });
   if (nav.errorText) throw new StepError(`${nav.errorText} at ${url}`);
+  tab.openedLoaderId = nav.loaderId;
   await settleOrFail(tab);
   const page = await pageEval(tab, "({ url: location.href, title: document.title })");
   const status = tab.net.documentStatus.get(nav.loaderId);
@@ -236,22 +391,55 @@ async function stepText(tab, [selector]) {
 
 // Evaluated in the page on every call that needs it.
 function bxPageLib(store) {
-  const { mutationClock } = store;
+  const { mutationClock, native, work } = store;
   // an action starts here: a DOM left unchanged from now on needs no long quiet
   const markAction = () => {
     store.actionAt = performance.now();
     store.changesAtAction = mutationClock.count;
+    store.frameDue = false;
   };
+  // an interval counts until it ran once after the action, and for good once it wrote to the DOM
+  const intervalPending = (interval) => interval.writes || interval.lastRunAt < (store.actionAt ?? 0);
+  const animationPending = () => work.followsAnimations && native.getAnimations().some((a) => a.playState === "running" && Number.isFinite(a.effect?.getComputedTiming().endTime));
+  const isIdle = () => work.pending.size === 0 && !work.leaving && !work.untrackedSource && work.untrackedAt < (store.actionAt ?? 0)
+    && ![...work.intervals.values()].some(intervalPending) && document.querySelector("iframe, frame, object, embed") === null && !animationPending();
+  // runs after every task the page has already queued
+  const idleTurn = () => new Promise((turned) => native.postTask(turned, { priority: "background" }));
+  const nextFrame = () => new Promise((shown) => {
+    native.requestAnimationFrame(() => native.requestAnimationFrame(shown));
+    native.setTimeout(shown, 100);
+  });
+  // resolves to "idle" when the page has nothing left to run, or to "quiet" when the quiet windows have passed
   const whenDomQuiet = (afterChangeMs, unchangedMs) => new Promise((done) => {
-    const check = () => {
+    let over = false;
+    const finish = (how) => {
+      over = true;
+      done(how);
+    };
+    const checkQuiet = () => {
+      if (over) return;
       const unchanged = store.actionAt !== undefined && mutationClock.count === store.changesAtAction;
       const quietAt = unchanged ? store.actionAt + unchangedMs : mutationClock.lastAt + afterChangeMs;
       const left = quietAt - performance.now();
-      if (left <= 0) return done(true);
-      setTimeout(check, left);
+      // a short timer or a frame the page has just asked for is a change still to come
+      if (left <= 0 && !(afterChangeMs > 0 && work?.reactionPending())) return finish("quiet");
+      native.setTimeout(checkQuiet, Math.max(left, 4));
     };
-    if (document.readyState === "complete") check();
-    else addEventListener("load", check, { once: true });
+    const checkIdle = async () => {
+      while (!over) {
+        const activity = mutationClock.count + work.callbacksRun;
+        if (work.frameObserver || store.frameDue) await nextFrame();
+        await idleTurn();
+        if (!isIdle()) await new Promise((later) => native.setTimeout(later, 4));
+        else if (mutationClock.count + work.callbacksRun === activity) return finish("idle");
+      }
+    };
+    const start = () => {
+      checkQuiet();
+      if (work && afterChangeMs > 0) checkIdle();
+    };
+    if (document.readyState === "complete") start();
+    else addEventListener("load", start, { once: true });
   });
   const norm = (s) => (s ?? "").replace(/\s+/g, " ").trim();
   const FILLABLE = "input:not([type=hidden],[type=button],[type=submit],[type=reset],[type=image],[type=checkbox],[type=radio],[type=file]), textarea, select, [contenteditable=''], [contenteditable=true]";
@@ -372,13 +560,24 @@ function bxPageLib(store) {
     return { error: found.length ? `${found.length} elements match ${target}: ${listed(found)}` : `no element matches ${target}` };
   };
 
+  // what a scroll or a resize starts (listeners, lazy content) runs with the next frame
+  const scrollToCenter = (el, options) => {
+    const topBefore = el.getBoundingClientRect().top;
+    el.scrollIntoView({ block: "center", behavior: "instant", ...options });
+    if (el.getBoundingClientRect().top !== topBefore) store.frameDue = true;
+  };
+  const markResize = () => {
+    markAction();
+    store.frameDue = true;
+  };
+
   // the point of the element a click or a hover goes to; a click also records whether it arrived
   const preparePointer = (target, isClick) => {
     markAction();
     const { el, error } = find(target, "click");
     if (error) return { error };
     if (isClick && (el.disabled || el.getAttribute("aria-disabled") === "true")) return { error: `${describe(el)} is disabled` };
-    el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+    scrollToCenter(el, { inline: "center" });
     const box = el.getClientRects()[0];
     if (!box) return { error: `${describe(el)} is not visible` };
     const x = box.left + box.width / 2;
@@ -420,7 +619,7 @@ function bxPageLib(store) {
       for (const type of ["input", "change"]) el.dispatchEvent(new Event(type, { bubbles: true }));
       return { label, expected: norm(option.label), typed: false };
     }
-    el.scrollIntoView({ block: "center", behavior: "instant" });
+    scrollToCenter(el);
     el.focus();
     if (el.getRootNode().activeElement !== el) return { error: `${label} did not take the focus` };
     if (el.isContentEditable) getSelection().selectAllChildren(el);
@@ -511,7 +710,7 @@ function bxPageLib(store) {
     return lines.join("\n");
   };
 
-  return { markAction, whenDomQuiet, preparePointer, prepareFill, prepareUpload, uploadedFileNames, setFieldValue, fieldValue, expectKey, arrived: () => store.arrived, hasText, text, table, snap };
+  return { markResize, whenDomQuiet, preparePointer, prepareFill, prepareUpload, uploadedFileNames, setFieldValue, fieldValue, expectKey, arrived: () => store.arrived, hasText, text, table, snap };
 }
 
 const inPage = (tab, method, ...args) => pageEval(tab, `(${bxPageLib})((${bxPageStore})()).${method}(${args.map((a) => JSON.stringify(a)).join(",")})`);
@@ -660,6 +859,7 @@ const applyViewport = (tab, { width, height }) => tab.cdp.send("Emulation.setDev
 
 // Emulation ends when this invocation detaches, so the size goes in the state file and prepareTab applies it again.
 async function stepViewport(tab, [size]) {
+  await inPage(tab, "markResize");
   if (size === "reset") {
     await tab.cdp.send("Emulation.clearDeviceMetricsOverride");
     tab.state.viewport = undefined;
@@ -667,7 +867,6 @@ async function stepViewport(tab, [size]) {
     const [, width, height] = /^(\d+)x(\d+)$/.exec(size) ?? [];
     if (!width) throw new StepError(`"${size}" is not a size; write 390x844, or reset`);
     tab.state.viewport = { width: Number(width), height: Number(height) };
-    await inPage(tab, "markAction");
     await applyViewport(tab, tab.state.viewport);
   }
   await settleOrFail(tab);
@@ -749,8 +948,8 @@ const stepLabel = ({ name, args }) => [name, ...args.map((a) => (/[\s"]/.test(a)
 async function prepareTab(tab) {
   const { cdp, chain } = tab;
   tab.net = trackNetwork(cdp);
-  // the clock of DOM changes starts with every document this invocation loads
-  const setup = [cdp.send("Page.enable"), cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: `(${bxPageStore})()` })];
+  // the record of changes and pending work starts with every document this invocation loads
+  const setup = [cdp.send("Page.enable"), cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: `(${bxPageStore})(true)` })];
   cdp.on("Page.javascriptDialogOpening", (p) => {
     tab.out.push(`dialog ${p.type} ${JSON.stringify(p.message)} accepted`);
     cdp.send("Page.handleJavaScriptDialog", { accept: true }).catch(() => {});

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>bx fixture: debounced search</title></head>
+<body>
+<main>
+  <h1>Debounced search</h1>
+  <label>Find city <input id="city"></label>
+  <ul id="matches"></ul>
+</main>
+<script>
+  const CITIES = ["Belo Horizonte", "Belford Roxo", "Campinas"];
+  const DEBOUNCE_MS = 300;
+  let timer;
+  document.getElementById("city").addEventListener("input", (event) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const found = CITIES.filter((city) => city.startsWith(event.target.value));
+      document.getElementById("matches").innerHTML = found.map((city) => `<li>${city}</li>`).join("");
+    }, DEBOUNCE_MS);
+  });
+</script>
+</body>
+</html>

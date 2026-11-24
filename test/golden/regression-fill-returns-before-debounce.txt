@@ -1,0 +1,7 @@
+exit code: 0
+--- stdout
+open FIXTURE/debounced-search.html "bx fixture: debounced search"
+fill textbox "Find city" = "Bel"
+Belo Horizonte
+Belford Roxo
+--- stderr
