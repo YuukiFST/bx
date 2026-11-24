@@ -25,6 +25,16 @@ test("open, url, eval and text chained in one invocation", async () => {
   s.cleanup();
 });
 
+// PLAN-E2E.md step 2, which the user asked to execute on 2026-11-24:
+//   "a new test that reads through eval a string of more than 65,536 bytes and compares the size"
+test("eval returns a value of more than 65,536 bytes whole", async () => {
+  const s = await bench.session();
+  const run = await s.bx(["open", "FIXTURE/other.html", "+", "eval", "'é'.repeat(200000)"]);
+  const value = JSON.parse(run.stdout.trimEnd().split("\n").at(-1));
+  assert.ok(value === "é".repeat(200000), `got ${value.length} characters`);
+  s.cleanup();
+});
+
 // PLAN.md section 4, principle 3: "a failed step stops the chain with a non-zero exit code"
 test("a failed step stops the chain, names the steps not run and exits 1", async () => {
   const s = await bench.session();

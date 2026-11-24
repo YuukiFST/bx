@@ -2,6 +2,7 @@
 // bx: a browser CLI for AI coding agents.
 // One invocation connects to a running Chrome over CDP, runs a chain of steps and exits.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -27,11 +28,103 @@ const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
 // ---------- CDP ----------
 
-function openWebSocket(wsUrl) {
+function openBuiltInWebSocket(wsUrl) {
   const ws = new WebSocket(wsUrl);
   return new Promise((ok, fail) => {
     ws.onopen = () => ok(ws);
     ws.onerror = () => fail(new Error(`cannot connect to ${wsUrl}`));
+  });
+}
+
+// any 16 bytes: the key only proves that the server speaks WebSocket
+const WS_KEY = Buffer.from("bx websocket key").toString("base64");
+const WS_TEXT = 1;
+const WS_CLOSE = 8;
+const WS_PING = 9;
+const WS_PONG = 10;
+
+// A client frame (RFC 6455 section 5.2) is masked; a mask of zeros leaves the payload as it is.
+function webSocketFrame(opcode, payload) {
+  const n = payload.length;
+  const sizeBytes = n < 126 ? 0 : n < 65536 ? 2 : 8;
+  const head = Buffer.alloc(2 + sizeBytes + 4);
+  head[0] = 0x80 | opcode;
+  head[1] = 0x80 | (sizeBytes === 0 ? n : sizeBytes === 2 ? 126 : 127);
+  if (sizeBytes === 2) head.writeUInt16BE(n, 2);
+  if (sizeBytes === 8) head.writeBigUInt64BE(BigInt(n), 2);
+  return Buffer.concat([head, payload]);
+}
+
+// Takes one whole frame off the front of the bytes received, or returns null when it has not all arrived.
+function readWebSocketFrame(bytes) {
+  if (bytes.length < 2) return null;
+  const shortSize = bytes[1] & 127;
+  const payloadAt = shortSize === 126 ? 4 : shortSize === 127 ? 10 : 2;
+  if (bytes.length < payloadAt) return null;
+  const size = shortSize === 126 ? bytes.readUInt16BE(2) : shortSize === 127 ? Number(bytes.readBigUInt64BE(2)) : shortSize;
+  const end = payloadAt + size;
+  if (bytes.length < end) return null;
+  return { final: (bytes[0] & 0x80) !== 0, opcode: bytes[0] & 15, payload: bytes.subarray(payloadAt, end), end };
+}
+
+// The built-in WebSocket costs about 38 ms more to load and connect; it stays for wss.
+function openWebSocket(wsUrl) {
+  const { protocol, hostname, host, port, pathname } = new URL(wsUrl);
+  if (protocol === "wss:") return openBuiltInWebSocket(wsUrl);
+  const socket = connect({ host: hostname.replace(/^\[|\]$/g, ""), port: Number(port || 80), noDelay: true });
+  const ws = { onmessage: null, onclose: null, send: (text) => socket.write(webSocketFrame(WS_TEXT, Buffer.from(text))) };
+  const fragments = [];
+  let chunks = [];
+  let received = 0;
+  let needed = 0;
+  let open = false;
+  const onFrame = ({ final, opcode, payload }) => {
+    if (opcode === WS_CLOSE) return socket.end();
+    if (opcode === WS_PING) return socket.write(webSocketFrame(WS_PONG, payload));
+    if (opcode > 2) return undefined;
+    fragments.push(payload);
+    if (!final) return undefined;
+    return ws.onmessage?.({ data: Buffer.concat(fragments.splice(0)).toString() });
+  };
+  const onBytes = (bytes) => {
+    let rest = bytes;
+    for (let frame = readWebSocketFrame(rest); frame; frame = readWebSocketFrame(rest)) {
+      rest = rest.subarray(frame.end);
+      onFrame(frame);
+    }
+    return rest;
+  };
+  return new Promise((ok, fail) => {
+    const refuse = () => {
+      socket.destroy();
+      fail(new Error(`cannot connect to ${wsUrl}`));
+    };
+    socket.on("error", refuse);
+    socket.on("close", () => {
+      refuse();
+      ws.onclose?.();
+    });
+    socket.on("connect", () => socket.write(`GET ${pathname} HTTP/1.1\r\nHost: ${host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ${WS_KEY}\r\nSec-WebSocket-Version: 13\r\n\r\n`));
+    socket.on("data", (chunk) => {
+      chunks.push(chunk);
+      received += chunk.length;
+      if (received < needed) return;
+      let bytes = chunks.length === 1 ? chunk : Buffer.concat(chunks);
+      if (!open) {
+        const headEnd = bytes.indexOf("\r\n\r\n");
+        if (headEnd >= 0) {
+          if (!/^HTTP\/1\.1 101 /.test(bytes.toString("latin1", 0, headEnd))) return refuse();
+          open = true;
+          bytes = bytes.subarray(headEnd + 4);
+          ok(ws);
+        }
+      }
+      if (open) bytes = onBytes(bytes);
+      chunks = [bytes];
+      received = bytes.length;
+      // a frame of many megabytes is joined once, not once per chunk
+      needed = open && received >= 10 && (bytes[1] & 127) === 127 ? 10 + Number(bytes.readBigUInt64BE(2)) : 0;
+    });
   });
 }
 
