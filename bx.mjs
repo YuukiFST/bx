@@ -703,12 +703,12 @@ function bxPageLib(store) {
     store.frameDue = true;
   };
 
-  // the point of the element a click or a hover goes to; a click also records whether it arrived
-  const preparePointer = (target, isClick) => {
+  // the point of the element a click or a hover goes to; a click also records whether its event arrived
+  const preparePointer = (target, awaitedEvent) => {
     markAction();
     const { el, error } = find(target, "click");
     if (error) return { error };
-    if (isClick && (el.disabled || el.getAttribute("aria-disabled") === "true")) return { error: `${describe(el)} is disabled` };
+    if (awaitedEvent && (el.disabled || el.getAttribute("aria-disabled") === "true")) return { error: `${describe(el)} is disabled` };
     scrollToCenter(el, { inline: "center" });
     const box = el.getClientRects()[0];
     if (!box) return { error: `${describe(el)} is not visible` };
@@ -717,9 +717,9 @@ function bxPageLib(store) {
     const top = elementAtPoint(x, y);
     const reaches = top && (containsAcrossShadow(el, top) || top.closest("label")?.control === el);
     if (!reaches) return { error: `${describe(el)} is covered by ${top ? describe(top) : "nothing: it is off screen"}` };
-    if (!isClick) return { x, y, label: describe(el) };
+    if (!awaitedEvent) return { x, y, label: describe(el) };
     store.arrived = false;
-    addEventListener("click", () => { store.arrived = true; }, { capture: true, once: true });
+    addEventListener(awaitedEvent, () => { store.arrived = true; }, { capture: true, once: true });
     return { x, y, label: describe(el) };
   };
 
@@ -872,24 +872,30 @@ async function tabOpenedByClick(tab, tabsBefore) {
   }
 }
 
-async function stepClick(tab, [target]) {
-  const [prepared, tabsBefore] = await Promise.all([inPage(tab, "preparePointer", target, true), pageTargetIds(tab)]);
+// verb: click or dblclick, both the name of the step and of the event that must reach the page
+async function clickTarget(tab, target, verb) {
+  const [prepared, tabsBefore] = await Promise.all([inPage(tab, "preparePointer", target, verb), pageTargetIds(tab)]);
   if (prepared.error) throw new StepError(prepared.error);
-  const mouse = { x: prepared.x, y: prepared.y, button: "left", clickCount: 1 };
   await tab.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: prepared.x, y: prepared.y });
-  await tab.cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", ...mouse });
-  await tab.cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...mouse });
-  await assertInputArrived(tab, "the click");
+  for (const clickCount of verb === "dblclick" ? [1, 2] : [1]) {
+    const mouse = { x: prepared.x, y: prepared.y, button: "left", clickCount };
+    await tab.cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", ...mouse });
+    await tab.cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...mouse });
+  }
+  await assertInputArrived(tab, `the ${verb}`);
   await settleOrFail(tab);
   const opened = await tabOpenedByClick(tab, tabsBefore);
-  if (!opened) return `click ${prepared.label}`;
+  if (!opened) return `${verb} ${prepared.label}`;
   await useTab(tab, opened);
   await settleOrFail(tab);
-  return `click ${prepared.label} -> new tab ${await pageEval(tab, "location.href")}`;
+  return `${verb} ${prepared.label} -> new tab ${await pageEval(tab, "location.href")}`;
 }
 
+const stepClick = (tab, [target]) => clickTarget(tab, target, "click");
+const stepDblclick = (tab, [target]) => clickTarget(tab, target, "dblclick");
+
 async function stepHover(tab, [target]) {
-  const prepared = await inPage(tab, "preparePointer", target, false);
+  const prepared = await inPage(tab, "preparePointer", target, null);
   if (prepared.error) throw new StepError(prepared.error);
   await tab.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: prepared.x, y: prepared.y });
   await settleOrFail(tab);
@@ -1044,6 +1050,7 @@ async function stepConsole(tab) {
 const STEPS = {
   open: { usage: "open <url>", minArgs: 1, maxArgs: 1, settles: true, front: true, run: stepOpen },
   click: { usage: "click <target>", minArgs: 1, maxArgs: 1, settles: true, front: true, run: stepClick },
+  dblclick: { usage: "dblclick <target>", minArgs: 1, maxArgs: 1, settles: true, front: true, run: stepDblclick },
   hover: { usage: "hover <target>", minArgs: 1, maxArgs: 1, settles: true, front: true, run: stepHover },
   fill: { usage: "fill <target> <text>", minArgs: 2, maxArgs: 2, settles: true, front: true, run: stepFill },
   upload: { usage: "upload <target> <file>", minArgs: 2, maxArgs: 2, settles: true, front: true, run: stepUpload },

@@ -13,6 +13,7 @@ Act first, look only after a failure: a wrong name fails and lists the names the
 Steps
 - `open <url>` navigate
 - `click <target>` goes on in the new tab when one opens
+- `dblclick <target>`
 - `hover <target>`
 - `fill <target> <text>` replaces the value, checks it (select: option label)
 - `upload <target> <file>`

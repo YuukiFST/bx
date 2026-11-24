@@ -41,6 +41,13 @@ test("hover shows what the page shows under the pointer", async () => {
   s.cleanup();
 });
 
+// PLAN-E2E.md step 4, which the user asked to execute on 2026-11-24: "double click with real mouse events"
+test("dblclick sends the mouse events of a real double click", async () => {
+  const s = await bench.session();
+  assertGolden("dblclick", bench.transcript(await s.bx(["open", "FIXTURE/double-click.html", "+", "dblclick", "Buy milk", "+", "text", "#events"])));
+  s.cleanup();
+});
+
 // "Missing steps: hover, file upload."
 test("upload attaches a file to a hidden file field found by its label, and fails on a missing file", async () => {
   const s = await bench.session();

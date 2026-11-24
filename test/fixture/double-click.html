@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>bx fixture: double click</title></head>
+<body>
+<main>
+  <h1>Double click</h1>
+  <p id="entry" style="cursor: pointer">Buy milk</p>
+  <p id="events"></p>
+</main>
+<script>
+  const seen = [];
+  for (const type of ["mousedown", "mouseup", "click", "dblclick"]) {
+    document.getElementById("entry").addEventListener(type, (event) => {
+      seen.push(`${type} ${event.detail}`);
+      document.getElementById("events").textContent = seen.join(", ");
+    });
+  }
+</script>
+</body>
+</html>
