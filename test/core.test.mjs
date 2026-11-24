@@ -35,6 +35,17 @@ test("eval returns a value of more than 65,536 bytes whole", async () => {
   s.cleanup();
 });
 
+// PLAN-E2E.md decision D3, option D, chosen by the user on 2026-11-24: "with -q only reads, warnings and errors print"
+test("-q prints reads, warnings and errors, and omits the lines of actions that succeeded", async () => {
+  const s = await bench.session();
+  const read = await s.bx(["-q", "open", "FIXTURE/", "+", "fill", "Search term", "Alfa", "+", "click", "Search", "+", "text", "#echo"]);
+  const failed = await s.bx(["-q", "click", "Nothing here"]);
+  const warned = await s.bx(["-q", "open", "FIXTURE/ticker.html"]);
+  const moved = await s.bx(["-q", "open", "FIXTURE/widgets.html", "+", "click", "Open report"]);
+  assertGolden("quiet", [read, failed, warned, moved].map(bench.transcript).join("\n=== next run\n"));
+  s.cleanup();
+});
+
 // PLAN.md section 4, principle 3: "a failed step stops the chain with a non-zero exit code"
 test("a failed step stops the chain, names the steps not run and exits 1", async () => {
   const s = await bench.session();

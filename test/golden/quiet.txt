@@ -1,0 +1,22 @@
+exit code: 0
+--- stdout
+searched: "Alfa" status: ""
+--- stderr
+
+=== next run
+exit code: 1
+--- stdout
+--- stderr
+bx: click "Nothing here": no element named "Nothing here" at FIXTURE/; the page has: @1 link "Other page", @2 textbox "Search term", @3 combobox "Status", @4 button "Search", @5 textbox "Plate", @6 button "Save", @7 button "Save", @8 button "Save Gama", @9 button "Delete", @10 button "Delete all", @11 button "Show slow panel", @12 div "Plain clickable div"
+
+=== next run
+exit code: 0
+--- stdout
+open FIXTURE/ticker.html "bx fixture: ticker" (the page was still changing: wait <text> before reading it)
+--- stderr
+
+=== next run
+exit code: 0
+--- stdout
+click link "Open report" -> new tab FIXTURE/other.html
+--- stderr

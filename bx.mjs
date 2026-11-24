@@ -1046,7 +1046,7 @@ async function stepConsole(tab) {
   return (omitted > 0 ? `(${omitted} earlier messages omitted)\n` : "") + lines.slice(-CONSOLE_LIMIT).join("\n");
 }
 
-// settles: the step changes the page and waits for it to settle. front: the step needs a visible, focused tab.
+// settles: the step changes the page and waits for it to settle; -q omits its line. front: the step needs a visible, focused tab.
 const STEPS = {
   open: { usage: "open <url>", minArgs: 1, maxArgs: 1, settles: true, front: true, run: stepOpen },
   click: { usage: "click <target>", minArgs: 1, maxArgs: 1, settles: true, front: true, run: stepClick },
@@ -1106,21 +1106,24 @@ async function prepareTab(tab) {
 // moves the rest of the chain, and the next invocations, to another tab
 async function useTab(tab, targetId) {
   tab.state.targetId = targetId;
+  tab.movedToNewTab = true;
   tab.cdp = cdpClient(await openWebSocket(pageWsUrl(targetId)));
   await prepareTab(tab);
 }
 
-async function runChain(chain, noSettle, out) {
+async function runChain(chain, { noSettle, quiet }, out) {
   const state = readState();
   const savedState = JSON.stringify(state);
-  const tab = { cdp: await attachTab(state), state, chain, noSettle, out, stillChanging: false, windowOpened: false };
+  const tab = { cdp: await attachTab(state), state, chain, noSettle, out, stillChanging: false, movedToNewTab: false, windowOpened: false };
   await prepareTab(tab);
   try {
     for (const [i, s] of chain.entries()) {
       try {
         const line = await s.step.run(tab, s.args);
-        out.push(tab.stillChanging ? `${line} (the page was still changing: wait <text> before reading it)` : line);
+        const notable = tab.stillChanging || tab.movedToNewTab;
+        if (!quiet || !s.step.settles || notable) out.push(tab.stillChanging ? `${line} (the page was still changing: wait <text> before reading it)` : line);
         tab.stillChanging = false;
+        tab.movedToNewTab = false;
       } catch (e) {
         if (!(e instanceof StepError)) throw e;
         const notRun = chain.slice(i + 1).map(stepLabel);
@@ -1142,8 +1145,8 @@ function finish(code, stdout, stderr) {
 
 async function main(argv) {
   const flags = [];
-  while (argv[0]?.startsWith("--")) flags.push(argv.shift());
-  const unknown = flags.find((f) => !["--help", "--version", "--no-settle"].includes(f));
+  while (argv[0]?.startsWith("--") || argv[0] === "-q") flags.push(argv.shift());
+  const unknown = flags.find((f) => !["--help", "--version", "--no-settle", "-q"].includes(f));
   if (unknown) return finish(2, "", `bx: unknown flag ${unknown}; see bx --help`);
   if (flags.includes("--version")) return finish(0, VERSION, "");
   if (flags.includes("--help") || argv.length === 0) {
@@ -1153,7 +1156,7 @@ async function main(argv) {
   const out = [];
   try {
     const chain = parseChain(argv);
-    const failure = await runChain(chain, flags.includes("--no-settle"), out);
+    const failure = await runChain(chain, { noSettle: flags.includes("--no-settle"), quiet: flags.includes("-q") }, out);
     finish(failure ? 1 : 0, out.join("\n"), failure ?? "");
   } catch (e) {
     if (e instanceof UsageError) return finish(2, "", `bx: ${e.message}`);
