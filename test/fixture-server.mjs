@@ -1,6 +1,7 @@
-// Serves the pages of test/fixture and three small APIs:
+// Serves the pages of test/fixture and four small APIs:
 //   /api/late    answers after 1 s (data that renders late)
 //   /api/search  echoes the query after 200 ms
+//   /api/signin  answers with a body the browser may not store
 //   /api/never   never answers (a page that never goes idle)
 // Standalone: node test/fixture-server.mjs [port]
 import { createServer } from "node:http";
@@ -24,6 +25,10 @@ async function handle(req, res) {
   if (url.pathname === "/api/search") {
     const message = `searched: "${url.searchParams.get("q")}" status: "${url.searchParams.get("status")}"`;
     return setTimeout(sendJson, SEARCH_MS, res, { message });
+  }
+  if (url.pathname === "/api/signin") {
+    res.setHeader("cache-control", "no-store");
+    return sendJson(res, { user: "ana" });
   }
   const page = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
   if (!/^[a-z-]+\.html$/.test(page)) return res.writeHead(404).end("not found");

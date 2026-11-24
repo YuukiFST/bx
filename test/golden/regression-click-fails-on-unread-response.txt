@@ -1,0 +1,6 @@
+exit code: 0
+--- stdout
+open FIXTURE/unread-response.html "bx fixture: unread response"
+click button "Enter"
+signed in
+--- stderr

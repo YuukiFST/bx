@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>bx fixture: unread response</title></head>
+<body>
+<main>
+  <h1>Unread response</h1>
+  <label>User <input id="user"></label>
+  <button id="enter">Enter</button>
+  <p id="status">signed out</p>
+</main>
+<script>
+  // only the status of the answer matters here, so its body is never read
+  document.getElementById("enter").addEventListener("click", async () => {
+    const answer = await fetch("/api/signin", { method: "POST", body: "{}" });
+    document.getElementById("status").textContent = answer.ok ? "signed in" : "refused";
+  });
+</script>
+</body>
+</html>

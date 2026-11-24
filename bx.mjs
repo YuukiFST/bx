@@ -212,7 +212,7 @@ function trackNetwork(cdp) {
   const net = { inflight: new Map(), lastEventAt: 0, documentStatus: new Map(), loaderId: undefined };
   cdp.on("Network.requestWillBeSent", (p) => {
     if (STREAMING_REQUEST_TYPES.has(p.type)) return;
-    net.inflight.set(p.requestId, { url: p.request.url, loaderId: p.loaderId });
+    net.inflight.set(p.requestId, { url: p.request.url, loaderId: p.loaderId, type: p.type, dataAt: undefined });
     net.lastEventAt = Date.now();
   });
   // Chrome sends no end event for some requests of the document being left (seen on Next.js link prefetches),
@@ -229,7 +229,13 @@ function trackNetwork(cdp) {
   };
   cdp.on("Network.loadingFinished", requestEnded);
   cdp.on("Network.loadingFailed", requestEnded);
+  const dataArrived = (p) => {
+    const request = net.inflight.get(p.requestId);
+    if (request) request.dataAt = Date.now();
+  };
+  cdp.on("Network.dataReceived", dataArrived);
   cdp.on("Network.responseReceived", (p) => {
+    dataArrived(p);
     if (p.type === "Document") net.documentStatus.set(p.requestId, p.response.status);
   });
   return net;
@@ -384,12 +390,44 @@ function bxPageStore(fromDocumentStart) {
     if (!property) continue;
     Object.defineProperty(HTMLElement.prototype, name, { ...property, set(listener) { work.followsAnimations = true; property.set.call(this, listener); } });
   }
+  // the responses whose body the page reads, by URL; a body read as a stream stays here
+  const bodyReads = (work.bodyReads = new Map());
+  const countRead = (url, change) => bodyReads.set(url, (bodyReads.get(url) ?? 0) + change);
+  for (const name of ["json", "text", "blob", "arrayBuffer", "formData", "bytes"]) {
+    wrap(Response.prototype, name, {
+      apply(target, self, args) {
+        const body = Reflect.apply(target, self, args);
+        const url = self.url;
+        countRead(url, 1);
+        return body.finally(() => countRead(url, -1));
+      },
+    });
+  }
+  const bodyProperty = Object.getOwnPropertyDescriptor(Response.prototype, "body");
+  Object.defineProperty(Response.prototype, "body", { ...bodyProperty, get() { countRead(this.url, 1); return bodyProperty.get.call(this); } });
   window.navigation?.addEventListener("navigate", (event) => {
     if (!event.downloadRequest && !event.destination.sameDocument) work.leaving = true;
   });
   // a navigation the page handled itself left no document
   for (const type of ["navigatesuccess", "navigateerror"]) window.navigation?.addEventListener(type, () => { work.leaving = false; });
   return store;
+}
+
+// Chrome sends no end event for a fetch whose body the page never reads (a login that only looks at `ok`).
+// Such a request ends once its data stops arriving.
+async function endUnreadFetches(tab) {
+  const { inflight } = tab.net;
+  const now = Date.now();
+  const silent = [...inflight].filter(([, request]) => request.type === "Fetch" && now - request.dataAt >= SETTLE_QUIET_MS);
+  if (silent.length === 0) return;
+  const read = await pageEval(tab, "window.__bx?.work && [...window.__bx.work.bodyReads].filter(([, reads]) => reads > 0).map(([url]) => url)").catch((e) => {
+    if (isNavigationError(e)) return undefined;
+    throw e;
+  });
+  for (const [requestId, request] of silent) {
+    if (read && !read.includes(request.url)) inflight.delete(requestId);
+    else request.dataAt = now;
+  }
 }
 
 function busyReason(tab) {
@@ -410,6 +448,7 @@ async function settle(tab) {
   for (;;) {
     const left = deadline - Date.now();
     if (left <= 0) return busyReason(tab);
+    if (!tab.noSettle) await endUnreadFetches(tab);
     const opening = tab.openedLoaderId !== undefined && tab.net.loaderId !== tab.openedLoaderId;
     if (!tab.noSettle && (tab.net.inflight.size > 0 || opening)) {
       await sleep(5);
