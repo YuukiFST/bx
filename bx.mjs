@@ -6,7 +6,7 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 const CDP_URL = (process.env.BX_CDP_URL ?? "http://127.0.0.1:9222").replace(/\/$/, "");
 const TIMEOUT_MS = Number(process.env.BX_TIMEOUT_MS ?? 15000);
 const SETTLE_QUIET_MS = 150;
