@@ -12,7 +12,7 @@ Act first, look only after a failure: a wrong name fails and lists the names the
 
 Steps
 - `open <url>` navigate
-- `click <target>` goes on in the new tab when one opens
+- `click <target>`, `dblclick <target>` go on in the new tab when one opens
 - `hover <target>`
 - `fill <target> <text>` replaces the value, checks it (select: option label)
 - `upload <target> <file>`
@@ -29,7 +29,7 @@ Steps
 
 Target: the visible name, label or placeholder (case-insensitive, exact before prefix), `@ref` from `snap` or from an error, or `css=<selector>`.
 
-Actions print one line and return after the page settles (no request in flight, DOM quiet), so no sleep is needed.
-Only content drawn by a timer needs `wait`.
+Actions print one line (`bx -q ...`: none) and return after the page settles (no request, short timer or change pending): never sleep.
+Only content drawn by a timer over 0.5 s needs `wait`.
 A page that never settles: `bx --no-settle ...`.
 Quote file paths.
