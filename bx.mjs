@@ -889,12 +889,12 @@ async function tabOpenedByClick(tab, tabsBefore) {
 async function clickTarget(tab, target, verb) {
   const [prepared, tabsBefore] = await Promise.all([inPage(tab, "preparePointer", target, verb), pageTargetIds(tab)]);
   if (prepared.error) throw new StepError(prepared.error);
-  await tab.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: prepared.x, y: prepared.y });
+  const sent = [tab.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: prepared.x, y: prepared.y })];
   for (const clickCount of verb === "dblclick" ? [1, 2] : [1]) {
     const mouse = { x: prepared.x, y: prepared.y, button: "left", clickCount };
-    await tab.cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", ...mouse });
-    await tab.cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...mouse });
+    sent.push(tab.cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", ...mouse }), tab.cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...mouse }));
   }
+  await Promise.all(sent);
   await assertInputArrived(tab, `the ${verb}`);
   await settleOrFail(tab);
   const opened = await tabOpenedByClick(tab, tabsBefore);
@@ -972,8 +972,10 @@ function keyEvent(spec) {
 
 async function pressKey(tab, spec) {
   const event = keyEvent(spec);
-  await tab.cdp.send("Input.dispatchKeyEvent", { type: event.text ? "keyDown" : "rawKeyDown", ...event });
-  await tab.cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...event, text: undefined });
+  await Promise.all([
+    tab.cdp.send("Input.dispatchKeyEvent", { type: event.text ? "keyDown" : "rawKeyDown", ...event }),
+    tab.cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...event, text: undefined }),
+  ]);
 }
 
 async function stepPress(tab, [key]) {
